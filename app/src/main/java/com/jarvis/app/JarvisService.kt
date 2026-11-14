@@ -137,3 +137,112 @@ class JarvisService : Service() {
         })
         engine.speak(t, TextToSpeech.QUEUE_FLUSH, null, UUID.randomUUID().toString())
     }
+    // ---------- brain ----------
+    private fun process(text: String) {
+        busy = true
+        Thread {
+            val reply = try { ask(text) } catch (e: Exception) { "Maaf karna sir, error aaya. " + (e.message ?: "") }
+            handler.post { speak(reply) { busy = false; listen() } }
+        }.start()
+    }
+
+    private fun ask(q: String): String {
+        val key = getSharedPreferences("jarvis", MODE_PRIVATE).getString("key", "") ?: ""
+        if (key.isBlank()) return "Sir, pehle app mein API key daaliye."
+        if (history.length() > 20) { while (history.length() > 0) history.remove(0) }
+        history.put(JSONObject().put("role", "user").put("content", q))
+
+        repeat(5) {
+            val body = JSONObject()
+                .put("model", MODEL).put("max_tokens", 400)
+                .put("system", SYS).put("tools", tools()).put("messages", history)
+            val c = URL("https://api.anthropic.com/v1/messages").openConnection() as HttpURLConnection
+            c.requestMethod = "POST"; c.connectTimeout = 15000; c.readTimeout = 40000; c.doOutput = true
+            c.setRequestProperty("x-api-key", key)
+            c.setRequestProperty("anthropic-version", "2023-06-01")
+            c.setRequestProperty("content-type", "application/json")
+            c.outputStream.use { it.write(body.toString().toByteArray()) }
+            val code = c.responseCode
+            val txt = (if (code in 200..299) c.inputStream else c.errorStream).bufferedReader().readText()
+            if (code !in 200..299) {
+                while (history.length() > 0) history.remove(0)
+                return if (code == 401) "Sir, API key galat hai." else "Sir, API error $code."
+            }
+            val j = JSONObject(txt)
+            val content = j.getJSONArray("content")
+            history.put(JSONObject().put("role", "assistant").put("content", content))
+            if (j.optString("stop_reason") == "tool_use") {
+                val results = JSONArray()
+                for (i in 0 until content.length()) {
+                    val b = content.getJSONObject(i)
+                    if (b.getString("type") == "tool_use") {
+                        results.put(
+                            JSONObject().put("type", "tool_result").put("tool_use_id", b.getString("id"))
+                                .put("content", runTool(b.getString("name"), b.getJSONObject("input")))
+                        )
+                    }
+                }
+                history.put(JSONObject().put("role", "user").put("content", results))
+            } else {
+                val sb = StringBuilder()
+                for (i in 0 until content.length()) {
+                    val b = content.getJSONObject(i)
+                    if (b.getString("type") == "text") sb.append(b.getString("text"))
+                }
+                return sb.toString().ifBlank { "Ji sir." }
+            }
+        }
+        return "Sir, kaam poora nahi ho paaya."
+    }
+
+    // ---------- tools ----------
+    private fun str(d: String) = JSONObject().put("type", "string").put("description", d)
+
+    private fun tool(n: String, d: String, props: JSONObject, req: List<String>) =
+        JSONObject().put("name", n).put("description", d).put(
+            "input_schema",
+            JSONObject().put("type", "object").put("properties", props).put("required", JSONArray(req))
+        )
+
+    private fun tools() = JSONArray()
+        .put(tool("get_time", "Get current date and time", JSONObject(), listOf()))
+        .put(tool("open_url", "Open a website or Google search in the browser (Chrome)",
+            JSONObject().put("url", str("Full https URL")), listOf("url")))
+        .put(tool("open_app", "Open an installed app by its name, e.g. Gmail, Drive, WhatsApp, YouTube",
+            JSONObject().put("name", str("App name")), listOf("name")))
+        .put(tool("whatsapp_message", "Open WhatsApp with a prefilled message. Sir must tap Send.",
+            JSONObject().put("phone", str("Phone with country code, digits only. Empty to choose contact"))
+                .put("message", str("Message text")), listOf("message")))
+
+    private fun launch(i: Intent) {
+        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        startActivity(i)
+    }
+
+    private fun runTool(name: String, a: JSONObject): String = try {
+        when (name) {
+            "get_time" -> SimpleDateFormat("EEEE, d MMMM yyyy, hh:mm a", Locale("en", "IN")).format(Date())
+            "open_url" -> { launch(Intent(Intent.ACTION_VIEW, Uri.parse(a.getString("url")))); "Opened" }
+            "whatsapp_message" -> {
+                val phone = a.optString("phone", "").filter { it.isDigit() }
+                val msg = Uri.encode(a.optString("message", ""))
+                val u = if (phone.isNotEmpty()) "https://wa.me/$phone?text=$msg" else "https://wa.me/?text=$msg"
+                launch(Intent(Intent.ACTION_VIEW, Uri.parse(u)))
+                "WhatsApp opened with the message; sir needs to tap Send"
+            }
+            "open_app" -> {
+                val want = a.getString("name").lowercase()
+                val pm = packageManager
+                val li = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+                val hit = pm.queryIntentActivities(li, 0).firstOrNull {
+                    it.loadLabel(pm).toString().lowercase().contains(want)
+                }
+                val launchIntent = hit?.let { pm.getLaunchIntentForPackage(it.activityInfo.packageName) }
+                if (launchIntent == null) "App not found" else { launch(launchIntent); "Opened" }
+            }
+            else -> "Unknown tool"
+        }
+    } catch (e: Exception) {
+        "Error: " + e.message
+    }
+}
