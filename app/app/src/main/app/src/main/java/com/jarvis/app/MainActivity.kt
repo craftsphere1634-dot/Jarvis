@@ -28,7 +28,7 @@ class MainActivity : Activity() {
         fun btn(t: String, f: () -> Unit) = Button(this).apply { text = t; setOnClickListener { f() } }
 
         val key = EditText(this).apply {
-            hint = "Anthropic API key (sk-ant-...)"
+            hint = "Gemini API key (AIza...)"
             setText(prefs.getString("key", ""))
             setSingleLine()
         }
