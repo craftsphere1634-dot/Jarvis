@@ -28,7 +28,7 @@ import java.util.UUID
 
 class JarvisService : Service() {
 
-    private val MODEL = "claude-haiku-5-5"
+    private val MODEL = "gemini-2.5-flash"
     private val SYS = "You are Jarvis, a Tony Stark style voice assistant. Address the user as 'sir'. " +
         "Your replies are spoken aloud: 1-2 short sentences, no markdown, no emojis. " +
         "If the user speaks Hindi or Hinglish, reply in Hinglish written in Roman letters; if English, reply in English. " +
@@ -137,7 +137,8 @@ class JarvisService : Service() {
         })
         engine.speak(t, TextToSpeech.QUEUE_FLUSH, null, UUID.randomUUID().toString())
     }
-    // ---------- brain ----------
+
+    // ---------- brain (Gemini) ----------
     private fun process(text: String) {
         busy = true
         Thread {
@@ -146,49 +147,66 @@ class JarvisService : Service() {
         }.start()
     }
 
+    private fun clearHistory() { while (history.length() > 0) history.remove(0) }
+
     private fun ask(q: String): String {
         val key = getSharedPreferences("jarvis", MODE_PRIVATE).getString("key", "") ?: ""
-        if (key.isBlank()) return "Sir, pehle app mein API key daaliye."
-        if (history.length() > 20) { while (history.length() > 0) history.remove(0) }
-        history.put(JSONObject().put("role", "user").put("content", q))
+        if (key.isBlank()) return "Sir, pehle app mein Gemini API key daaliye."
+        if (history.length() > 20) clearHistory()
+        history.put(JSONObject().put("role", "user").put("parts", JSONArray().put(JSONObject().put("text", q))))
 
         repeat(5) {
             val body = JSONObject()
-                .put("model", MODEL).put("max_tokens", 400)
-                .put("system", SYS).put("tools", tools()).put("messages", history)
-            val c = URL("https://api.anthropic.com/v1/messages").openConnection() as HttpURLConnection
+                .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", SYS))))
+                .put("contents", history)
+                .put("tools", JSONArray().put(JSONObject().put("functionDeclarations", tools())))
+                .put("generationConfig", JSONObject()
+                    .put("maxOutputTokens", 800)
+                    .put("thinkingConfig", JSONObject().put("thinkingBudget", 0)))
+            val c = URL("https://generativelanguage.googleapis.com/v1beta/models/$MODEL:generateContent")
+                .openConnection() as HttpURLConnection
             c.requestMethod = "POST"; c.connectTimeout = 15000; c.readTimeout = 40000; c.doOutput = true
-            c.setRequestProperty("x-api-key", key)
-            c.setRequestProperty("anthropic-version", "2023-06-01")
+            c.setRequestProperty("x-goog-api-key", key)
             c.setRequestProperty("content-type", "application/json")
             c.outputStream.use { it.write(body.toString().toByteArray()) }
             val code = c.responseCode
             val txt = (if (code in 200..299) c.inputStream else c.errorStream).bufferedReader().readText()
             if (code !in 200..299) {
-                while (history.length() > 0) history.remove(0)
-                return if (code == 401) "Sir, API key galat hai." else "Sir, API error $code."
+                clearHistory()
+                return when (code) {
+                    400, 401, 403 -> "Sir, API key galat lag rahi hai, error $code."
+                    429 -> "Sir, free limit khatam ho gayi, thodi der baad try kijiye."
+                    else -> "Sir, API error $code."
+                }
             }
             val j = JSONObject(txt)
-            val content = j.getJSONArray("content")
-            history.put(JSONObject().put("role", "assistant").put("content", content))
-            if (j.optString("stop_reason") == "tool_use") {
-                val results = JSONArray()
-                for (i in 0 until content.length()) {
-                    val b = content.getJSONObject(i)
-                    if (b.getString("type") == "tool_use") {
-                        results.put(
-                            JSONObject().put("type", "tool_result").put("tool_use_id", b.getString("id"))
-                                .put("content", runTool(b.getString("name"), b.getJSONObject("input")))
+            val cand = j.optJSONArray("candidates")?.optJSONObject(0) ?: return "Sir, jawab nahi mila."
+            val content = cand.optJSONObject("content") ?: return "Sir, jawab nahi mila."
+            val parts = content.optJSONArray("parts") ?: return "Sir, jawab nahi mila."
+            content.put("role", "model")
+            history.put(content)
+
+            val responses = JSONArray()
+            val sb = StringBuilder()
+            for (i in 0 until parts.length()) {
+                val p = parts.getJSONObject(i)
+                val fc = p.optJSONObject("functionCall")
+                if (fc != null) {
+                    val name = fc.getString("name")
+                    val result = runTool(name, fc.optJSONObject("args") ?: JSONObject())
+                    responses.put(
+                        JSONObject().put(
+                            "functionResponse",
+                            JSONObject().put("name", name).put("response", JSONObject().put("result", result))
                         )
-                    }
+                    )
+                } else if (p.has("text") && !p.optBoolean("thought", false)) {
+                    sb.append(p.getString("text"))
                 }
-                history.put(JSONObject().put("role", "user").put("content", results))
+            }
+            if (responses.length() > 0) {
+                history.put(JSONObject().put("role", "user").put("parts", responses))
             } else {
-                val sb = StringBuilder()
-                for (i in 0 until content.length()) {
-                    val b = content.getJSONObject(i)
-                    if (b.getString("type") == "text") sb.append(b.getString("text"))
-                }
                 return sb.toString().ifBlank { "Ji sir." }
             }
         }
@@ -198,11 +216,16 @@ class JarvisService : Service() {
     // ---------- tools ----------
     private fun str(d: String) = JSONObject().put("type", "string").put("description", d)
 
-    private fun tool(n: String, d: String, props: JSONObject, req: List<String>) =
-        JSONObject().put("name", n).put("description", d).put(
-            "input_schema",
-            JSONObject().put("type", "object").put("properties", props).put("required", JSONArray(req))
-        )
+    private fun tool(n: String, d: String, props: JSONObject, req: List<String>): JSONObject {
+        val o = JSONObject().put("name", n).put("description", d)
+        if (props.length() > 0) {
+            o.put(
+                "parameters",
+                JSONObject().put("type", "object").put("properties", props).put("required", JSONArray(req))
+            )
+        }
+        return o
+    }
 
     private fun tools() = JSONArray()
         .put(tool("get_time", "Get current date and time", JSONObject(), listOf()))
