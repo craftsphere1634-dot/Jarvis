@@ -130,8 +130,8 @@ class JarvisService : Service() {
     private fun speak(t: String, done: () -> Unit) {
         val engine = tts ?: return
                engine.language = if (t.any { it in '\u0900'..'\u097F' }) Locale("hi", "IN") else Locale.UK
-        engine.setPitch(0.75f)
-        engine.setSpeechRate(0.92f)
+                engine.setPitch(0.95f)
+        engine.setSpeechRate(1.0f)
         engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             override fun onStart(u: String?) {}
             override fun onDone(u: String?) { handler.post { done() } }
