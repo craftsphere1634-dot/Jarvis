@@ -160,9 +160,7 @@ class JarvisService : Service() {
                 .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", SYS))))
                 .put("contents", history)
                 .put("tools", JSONArray().put(JSONObject().put("functionDeclarations", tools())))
-                .put("generationConfig", JSONObject()
-                    .put("maxOutputTokens", 800)
-                    .put("thinkingConfig", JSONObject().put("thinkingBudget", 0)))
+                                .put("generationConfig", JSONObject().put("maxOutputTokens", 800))
             val c = URL("https://generativelanguage.googleapis.com/v1beta/models/$MODEL:generateContent")
                 .openConnection() as HttpURLConnection
             c.requestMethod = "POST"; c.connectTimeout = 15000; c.readTimeout = 40000; c.doOutput = true
