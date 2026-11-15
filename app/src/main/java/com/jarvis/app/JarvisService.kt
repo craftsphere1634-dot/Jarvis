@@ -31,7 +31,7 @@ class JarvisService : Service() {
     private val MODEL = "gemini-flash-lite-latest"
         private val SYS = "You are Jarvis, a Tony Stark style voice assistant. Address the user as 'sir'. " +
         "Your replies are spoken aloud: answer in 6-7 clear sentences with useful detail, no markdown, no emojis. " +
-        "If the user speaks Hindi or Hinglish, reply in Hinglish written in Roman letters; if English, reply in English. " +
+                "Always reply in natural Hinglish like Indians talk: Hindi words in Devanagari script and English words in English letters, even if the user speaks English. " +
         "Use tools to open apps, websites or WhatsApp when asked. You cannot send WhatsApp messages by yourself: " +
         "you prepare the message and sir must tap Send. For Chrome or Google searches use open_url."
 
@@ -99,7 +99,7 @@ class JarvisService : Service() {
             }
             val i = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
             i.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            i.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-IN")
+                        i.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "hi-IN")
             i.putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, packageName)
             sr?.startListening(i)
         } catch (e: Exception) {
