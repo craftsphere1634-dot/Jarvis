@@ -4,14 +4,19 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraManager
+import android.media.AudioManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.provider.Settings
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -29,11 +34,13 @@ import java.util.UUID
 class JarvisService : Service() {
 
     private val MODEL = "gemini-flash-lite-latest"
-        private val SYS = "You are Jarvis, a Tony Stark style voice assistant. Address the user as 'sir'. " +
-        "Your replies are spoken aloud: answer in 6-7 clear sentences with useful detail, no markdown, no emojis. " +
-                "Always reply in natural Hinglish like Indians talk: Hindi words in Devanagari script and English words in English letters, even if the user speaks English. " +
-        "Use tools to open apps, websites or WhatsApp when asked. You cannot send WhatsApp messages by yourself: " +
-        "you prepare the message and sir must tap Send. For Chrome or Google searches use open_url."
+    private val SYS = "You are Jarvis, a Tony Stark style voice assistant. Address the user as 'sir'. " +
+        "Your replies are spoken aloud, no markdown, no emojis. Keep replies to 1 short sentence for simple commands like opening apps, flashlight or volume, and 6-7 clear sentences with useful detail only for questions that need explanation. " +
+        "Always reply in natural Hinglish like Indians talk: Hindi words in Devanagari script and English words in English letters, even if the user speaks English. " +
+        "Use tools to open apps, websites, YouTube searches, WhatsApp, device settings, flashlight and volume when asked. " +
+        "When sir says to remember something, use the remember tool. " +
+        "You cannot send WhatsApp messages by yourself: you prepare the message and sir must tap Send. " +
+        "For Chrome or Google searches use open_url."
 
     private val handler = Handler(Looper.getMainLooper())
     private var sr: SpeechRecognizer? = null
@@ -42,6 +49,8 @@ class JarvisService : Service() {
     private var busy = false
     private val history = JSONArray()
     private val wake = Regex("jarvis|jarvish|jarvas|jarvice|जार्विस|जारविस|जार्विश")
+
+    private fun prefs() = getSharedPreferences("jarvis", MODE_PRIVATE)
 
     override fun onBind(i: Intent?): IBinder? = null
     override fun onStartCommand(i: Intent?, f: Int, s: Int) = START_STICKY
@@ -99,7 +108,7 @@ class JarvisService : Service() {
             }
             val i = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
             i.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                        i.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "hi-IN")
+            i.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "hi-IN")
             i.putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, packageName)
             sr?.startListening(i)
         } catch (e: Exception) {
@@ -129,8 +138,8 @@ class JarvisService : Service() {
     // ---------- speaking ----------
     private fun speak(t: String, done: () -> Unit) {
         val engine = tts ?: return
-               engine.language = if (t.any { it in '\u0900'..'\u097F' }) Locale("hi", "IN") else Locale.UK
-                engine.setPitch(0.95f)
+        engine.language = if (t.any { it in '\u0900'..'\u097F' }) Locale("hi", "IN") else Locale.UK
+        engine.setPitch(0.95f)
         engine.setSpeechRate(1.0f)
         engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             override fun onStart(u: String?) {}
@@ -152,17 +161,20 @@ class JarvisService : Service() {
     private fun clearHistory() { while (history.length() > 0) history.remove(0) }
 
     private fun ask(q: String): String {
-        val key = getSharedPreferences("jarvis", MODE_PRIVATE).getString("key", "") ?: ""
+        val key = prefs().getString("key", "") ?: ""
         if (key.isBlank()) return "Sir, pehle app mein Gemini API key daaliye."
         if (history.length() > 20) clearHistory()
         history.put(JSONObject().put("role", "user").put("parts", JSONArray().put(JSONObject().put("text", q))))
 
+        val facts = prefs().getString("facts", "") ?: ""
+        val sysText = if (facts.isBlank()) SYS else SYS + " Things you remember about sir: " + facts.replace("\n", "; ") + "."
+
         repeat(5) {
             val body = JSONObject()
-                .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", SYS))))
+                .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", sysText))))
                 .put("contents", history)
                 .put("tools", JSONArray().put(JSONObject().put("functionDeclarations", tools())))
-                                .put("generationConfig", JSONObject().put("maxOutputTokens", 800))
+                .put("generationConfig", JSONObject().put("maxOutputTokens", 1200))
             val c = URL("https://generativelanguage.googleapis.com/v1beta/models/$MODEL:generateContent")
                 .openConnection() as HttpURLConnection
             c.requestMethod = "POST"; c.connectTimeout = 15000; c.readTimeout = 40000; c.doOutput = true
@@ -214,7 +226,7 @@ class JarvisService : Service() {
     }
 
     // ---------- tools ----------
-    private fun str(d: String) = JSONObject().put("type", "string").put("description", d)
+    private fun prop(type: String, d: String) = JSONObject().put("type", type).put("description", d)
 
     private fun tool(n: String, d: String, props: JSONObject, req: List<String>): JSONObject {
         val o = JSONObject().put("name", n).put("description", d)
@@ -230,12 +242,23 @@ class JarvisService : Service() {
     private fun tools() = JSONArray()
         .put(tool("get_time", "Get current date and time", JSONObject(), listOf()))
         .put(tool("open_url", "Open a website or Google search in the browser (Chrome)",
-            JSONObject().put("url", str("Full https URL")), listOf("url")))
+            JSONObject().put("url", prop("string", "Full https URL")), listOf("url")))
         .put(tool("open_app", "Open an installed app by its name, e.g. Gmail, Drive, WhatsApp, YouTube",
-            JSONObject().put("name", str("App name")), listOf("name")))
+            JSONObject().put("name", prop("string", "App name")), listOf("name")))
         .put(tool("whatsapp_message", "Open WhatsApp with a prefilled message. Sir must tap Send.",
-            JSONObject().put("phone", str("Phone with country code, digits only. Empty to choose contact"))
-                .put("message", str("Message text")), listOf("message")))
+            JSONObject().put("phone", prop("string", "Phone with country code, digits only. Empty to choose contact"))
+                .put("message", prop("string", "Message text")), listOf("message")))
+        .put(tool("youtube_search", "Search YouTube for a song, video or topic and show results",
+            JSONObject().put("query", prop("string", "Search text")), listOf("query")))
+        .put(tool("flashlight", "Turn the phone flashlight on or off",
+            JSONObject().put("on", prop("boolean", "true to turn on, false to turn off")), listOf("on")))
+        .put(tool("set_volume", "Set the media volume as a percentage from 0 to 100",
+            JSONObject().put("percent", prop("integer", "Volume percent 0-100")), listOf("percent")))
+        .put(tool("open_settings", "Open a phone settings screen: wifi, bluetooth, display, sound or general",
+            JSONObject().put("what", prop("string", "wifi, bluetooth, display, sound or general")), listOf("what")))
+        .put(tool("remember", "Save a fact about sir to remember permanently",
+            JSONObject().put("fact", prop("string", "The fact to remember")), listOf("fact")))
+        .put(tool("forget_all", "Erase everything remembered about sir", JSONObject(), listOf()))
 
     private fun launch(i: Intent) {
         i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -263,6 +286,50 @@ class JarvisService : Service() {
                 val launchIntent = hit?.let { pm.getLaunchIntentForPackage(it.activityInfo.packageName) }
                 if (launchIntent == null) "App not found" else { launch(launchIntent); "Opened" }
             }
+            "youtube_search" -> {
+                val qy = Uri.encode(a.optString("query", ""))
+                launch(Intent(Intent.ACTION_VIEW, Uri.parse("https://www.youtube.com/results?search_query=$qy")))
+                "YouTube search opened"
+            }
+            "flashlight" -> {
+                val on = a.optBoolean("on", true)
+                val cm = getSystemService(Context.CAMERA_SERVICE) as CameraManager
+                val id = cm.cameraIdList.firstOrNull {
+                    cm.getCameraCharacteristics(it).get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
+                }
+                if (id == null) "No flashlight found" else {
+                    cm.setTorchMode(id, on)
+                    if (on) "Flashlight on" else "Flashlight off"
+                }
+            }
+            "set_volume" -> {
+                val pct = a.optInt("percent", 50).coerceIn(0, 100)
+                val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                val max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+                am.setStreamVolume(AudioManager.STREAM_MUSIC, pct * max / 100, AudioManager.FLAG_SHOW_UI)
+                "Volume set to $pct percent"
+            }
+            "open_settings" -> {
+                val w = a.optString("what", "").lowercase()
+                val action = when {
+                    w.contains("wifi") || w.contains("wi-fi") -> Settings.ACTION_WIFI_SETTINGS
+                    w.contains("bluetooth") -> Settings.ACTION_BLUETOOTH_SETTINGS
+                    w.contains("display") || w.contains("brightness") -> Settings.ACTION_DISPLAY_SETTINGS
+                    w.contains("sound") -> Settings.ACTION_SOUND_SETTINGS
+                    else -> Settings.ACTION_SETTINGS
+                }
+                launch(Intent(action))
+                "Settings opened"
+            }
+            "remember" -> {
+                val f = a.optString("fact", "").trim()
+                if (f.isBlank()) "Nothing to save" else {
+                    val old = prefs().getString("facts", "") ?: ""
+                    prefs().edit().putString("facts", (old + "\n" + f).trim()).apply()
+                    "Saved"
+                }
+            }
+            "forget_all" -> { prefs().edit().remove("facts").apply(); "Memory cleared" }
             else -> "Unknown tool"
         }
     } catch (e: Exception) {
